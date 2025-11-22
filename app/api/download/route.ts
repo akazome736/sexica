@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import ytdl from 'ytdl-core';
 
 export async function POST(request: NextRequest) {
   try {
-    const { url, quality = '720' } = await request.json();
+    const { url, quality = '720', action = 'download' } = await request.json();
 
     if (!url) {
       return NextResponse.json({ error: 'URL is required' }, { status: 400 });
@@ -17,42 +14,85 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid URL format' }, { status: 400 });
     }
 
-    // Use yt-dlp to get video info in JSON format
-    const command = `yt-dlp -j --format "best[height<=${quality}]/best" "${url}"`;
-    
-    const { stdout, stderr } = await execAsync(command, {
-      timeout: 30000, // 30 second timeout
-    });
+    if (action === 'metadata') {
+      // Get video info using ytdl-core
+      try {
+        const info = await ytdl.getInfo(url);
 
-    if (stderr && !stdout) {
-      throw new Error(stderr);
+        // Extract available formats and qualities
+        const formats = info.formats.filter(format =>
+          format.hasVideo &&
+          format.height &&
+          format.height >= 360 &&
+          format.height <= 2160
+        );
+
+        // Get unique qualities
+        const availableQualities = Array.from(new Set(
+          formats.map(format => format.height?.toString()).filter(Boolean)
+        )).sort((a, b) => parseInt(a!) - parseInt(b!));
+
+        return NextResponse.json({
+          title: info.videoDetails.title,
+          thumbnail: info.videoDetails.thumbnails[0]?.url,
+          duration: parseInt(info.videoDetails.lengthSeconds),
+          availableQualities: availableQualities.length > 0 ? availableQualities : ['360', '480', '720', '1080'],
+        });
+      } catch (infoError) {
+        console.error('Metadata fetch error:', infoError);
+        return NextResponse.json({
+          error: 'Failed to fetch video metadata. Please check the URL and try again.'
+        }, { status: 500 });
+      }
+    } else {
+      // Download mode - get download URL for specific quality
+      try {
+        const info = await ytdl.getInfo(url);
+
+        // Find the best format for the requested quality
+        const formats = info.formats.filter(format =>
+          format.hasVideo &&
+          format.height &&
+          format.height <= parseInt(quality)
+        );
+
+        // Sort by height descending to get the highest quality available under the limit
+        formats.sort((a, b) => (b.height || 0) - (a.height || 0));
+        const selectedFormat = formats[0];
+
+        if (!selectedFormat) {
+          return NextResponse.json({ error: 'No suitable format found for the requested quality' }, { status: 404 });
+        }
+
+        return NextResponse.json({
+          downloadUrl: selectedFormat.url,
+          title: info.videoDetails.title,
+          thumbnail: info.videoDetails.thumbnails[0]?.url,
+          duration: parseInt(info.videoDetails.lengthSeconds),
+          filesize: selectedFormat.contentLength ? parseInt(selectedFormat.contentLength) : undefined,
+          format: selectedFormat.container || 'mp4',
+        });
+      } catch (downloadError) {
+        console.error('Download error:', downloadError);
+        return NextResponse.json({
+          error: 'Failed to get download URL. Please try again.'
+        }, { status: 500 });
+      }
     }
-
-    // Parse JSON output
-    const videoInfo = JSON.parse(stdout);
-    
-    return NextResponse.json({
-      downloadUrl: videoInfo.url,
-      title: videoInfo.title,
-      thumbnail: videoInfo.thumbnail,
-      duration: videoInfo.duration,
-      filesize: videoInfo.filesize || videoInfo.filesize_approx,
-      format: videoInfo.format,
-    });
   } catch (error: any) {
-    console.error('Download error:', error);
-    
+    console.error('API error:', error);
+
     // Check for specific errors
-    if (error.message?.includes('Unsupported URL')) {
-      return NextResponse.json({ error: 'Unsupported video source' }, { status: 400 });
-    }
-    
-    if (error.killed) {
-      return NextResponse.json({ error: 'Request timeout - video may be too large' }, { status: 408 });
+    if (error.message?.includes('No video id found')) {
+      return NextResponse.json({ error: 'Invalid YouTube URL' }, { status: 400 });
     }
 
-    return NextResponse.json({ 
-      error: 'Failed to extract video URL. Make sure yt-dlp is installed and the URL is valid.' 
+    if (error.message?.includes('Video unavailable')) {
+      return NextResponse.json({ error: 'Video is unavailable or private' }, { status: 404 });
+    }
+
+    return NextResponse.json({
+      error: 'Failed to process video. Please check the URL and try again.'
     }, { status: 500 });
   }
 }
