@@ -77,7 +77,8 @@ export async function POST(request: NextRequest) {
         // Get unique qualities
         const availableQualities = Array.from(new Set(
           formats.map((format: YTDlpFormat) => format.height?.toString()).filter(Boolean)
-        )).sort((a: string, b: string) => parseInt(a) - parseInt(b));
+        )).filter((quality): quality is string => quality !== undefined)
+          .sort((a: string, b: string) => parseInt(a) - parseInt(b));
 
         return NextResponse.json({
           title: metadata.title,
