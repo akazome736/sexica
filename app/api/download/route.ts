@@ -3,6 +3,22 @@ import YTDlpWrap from 'yt-dlp-wrap';
 import { promises as fs } from 'fs';
 import path from 'path';
 
+// Type definitions for yt-dlp format objects
+interface YTDlpFormat {
+  height?: number;
+  ext?: string;
+  hasVideo?: boolean;
+  url?: string;
+  filesize?: number;
+}
+
+interface YTDlpMetadata {
+  title: string;
+  thumbnail: string;
+  duration: number;
+  formats: YTDlpFormat[];
+}
+
 let ytDlpWrap: YTDlpWrap | null = null;
 
 // Initialize yt-dlp-wrap with binary
@@ -48,10 +64,10 @@ export async function POST(request: NextRequest) {
     if (action === 'metadata') {
       try {
         // Get video info using yt-dlp
-        const metadata = await ytDlp.getVideoInfo(url);
+        const metadata: YTDlpMetadata = await ytDlp.getVideoInfo(url);
 
         // Extract available formats and qualities
-        const formats = metadata.formats.filter(format =>
+        const formats = metadata.formats.filter((format: YTDlpFormat) =>
           format.height &&
           format.height >= 360 &&
           format.height <= 2160 &&
@@ -60,8 +76,8 @@ export async function POST(request: NextRequest) {
 
         // Get unique qualities
         const availableQualities = Array.from(new Set(
-          formats.map(format => format.height?.toString()).filter(Boolean)
-        )).sort((a, b) => parseInt(a!) - parseInt(b!));
+          formats.map((format: YTDlpFormat) => format.height?.toString()).filter(Boolean)
+        )).sort((a: string, b: string) => parseInt(a) - parseInt(b));
 
         return NextResponse.json({
           title: metadata.title,
@@ -85,23 +101,37 @@ export async function POST(request: NextRequest) {
       // Download mode - get download URL for specific quality
       try {
         // Get video info to find the best format
-        const metadata = await ytDlp.getVideoInfo(url);
+        const metadata: YTDlpMetadata = await ytDlp.getVideoInfo(url);
 
-        // Find formats with video and matching quality
-        const formats = metadata.formats.filter(format =>
-          format.height &&
-          format.height <= parseInt(quality) &&
-          format.ext === 'mp4' &&
-          format.hasVideo
+        // Get all available video formats (prefer MP4, then WebM)
+        const videoFormats = metadata.formats.filter((format: YTDlpFormat) =>
+          format.url && format.height && format.height > 0 &&
+          (format.ext === 'mp4' || format.ext === 'webm')
         );
 
-        // Sort by height descending to get the highest quality available under the limit
-        formats.sort((a, b) => (b.height || 0) - (a.height || 0));
-        const selectedFormat = formats[0];
-
-        if (!selectedFormat) {
-          return NextResponse.json({ error: 'No suitable format found for the requested quality' }, { status: 404 });
+        if (videoFormats.length === 0) {
+          return NextResponse.json({ error: 'No video formats available for this video' }, { status: 404 });
         }
+
+        // Find the best format for the requested quality
+        const requestedHeight = parseInt(quality);
+
+        // Sort by quality preference: MP4 > WebM, then closest to requested quality
+        videoFormats.sort((a: YTDlpFormat, b: YTDlpFormat) => {
+          // Prefer MP4 over WebM
+          const aIsMp4 = a.ext === 'mp4' ? 1 : 0;
+          const bIsMp4 = b.ext === 'mp4' ? 1 : 0;
+          if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+
+          // Then closest to requested quality
+          const aHeight = a.height || 0;
+          const bHeight = b.height || 0;
+          const aDiff = Math.abs(aHeight - requestedHeight);
+          const bDiff = Math.abs(bHeight - requestedHeight);
+          return aDiff - bDiff;
+        });
+
+        const selectedFormat = videoFormats[0];
 
         return NextResponse.json({
           downloadUrl: selectedFormat.url,
